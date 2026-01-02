@@ -7,7 +7,7 @@ This document provides an exhaustive explanation of every line in the minimal co
 
 ## OVERVIEW
 
-This is a ~100-line Go program that demonstrates the fundamental syscalls and kernel features that power containers. It's stripped of all abstractions to show you exactly what's happening at the system level.
+This program demonstrates the fundamental syscalls and kernel features that power containers. It's stripped of all abstractions to show you exactly what's happening at the system level.
 
 **What this demonstrates:**
 - Namespace creation (process isolation)
@@ -17,169 +17,9 @@ This is a ~100-line Go program that demonstrates the fundamental syscalls and ke
 
 ---
 
-## FULL CODE WITH LINE NUMBERS
-
-```go
- 1  package main
- 2  
- 3  import (
- 4      "fmt"
- 5      "os"
- 6      "os/exec"
- 7      "syscall"
- 8  )
- 9  
-10  // Main function - this runs in the parent namespace
-11  func main() {
-12      switch os.Args[1] {
-13      case "run":
-14          run()
-15      case "child":
-16          child()
-17      default:
-18          panic("bad command")
-19      }
-20  }
-21  
-22  func run() {
-23      fmt.Printf("Running %v as PID %d\n", os.Args[2:], os.Getpid())
-24      
-25      // Create the command that will run in new namespaces
-26      cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
-27      cmd.Stdin = os.Stdin
-28      cmd.Stdout = os.Stdout
-29      cmd.Stderr = os.Stderr
-30      
-31      // CRITICAL: These flags create new namespaces
-32      cmd.SysProcAttr = &syscall.SysProcAttr{
-33          Cloneflags: syscall.CLONE_NEWUTS |   // Hostname
-34                     syscall.CLONE_NEWPID |    // Process IDs
-35                     syscall.CLONE_NEWNS |     // Mount points
-36                     syscall.CLONE_NEWNET |    // Network
-37                     syscall.CLONE_NEWIPC,     // IPC
-38          Unshareflags: syscall.CLONE_NEWNS,
-39      }
-40      
-41      must(cmd.Run())
-42  }
-43  
-44  func child() {
-45      fmt.Printf("Running %v as PID %d\n", os.Args[2:], os.Getpid())
-46      
-47      // Setup cgroup for memory limit (simplified)
-48      cgroups()
-49      
-50      // Change hostname (proving UTS namespace isolation)
-51      must(syscall.Sethostname([]byte("container")))
-52      
-53      // Change root filesystem (pivot_root would be more correct)
-54      must(syscall.Chroot("/path/to/rootfs"))
-55      must(os.Chdir("/"))
-56      
-57      // Mount proc filesystem
-58      must(syscall.Mount("proc", "proc", "proc", 0, ""))
-59      
-60      // Execute the actual command
-61      cmd := exec.Command(os.Args[2], os.Args[3:]...)
-62      cmd.Stdin = os.Stdin
-63      cmd.Stdout = os.Stdout
-64      cmd.Stderr = os.Stderr
-65      
-66      must(cmd.Run())
-67      
-68      // Cleanup
-69      must(syscall.Unmount("proc", 0))
-70  }
-71  
-72  func cgroups() {
-73      cgroupPath := "/sys/fs/cgroup/memory/mycontainer"
-74      os.Mkdir(cgroupPath, 0755)
-75      
-76      // Limit memory to 100MB
-77      must(os.WriteFile(cgroupPath+"/memory.limit_in_bytes", []byte("100000000"), 0700))
-78      
-79      // Add current process to cgroup
-80      must(os.WriteFile(cgroupPath+"/cgroup.procs", []byte(fmt.Sprintf("%d", os.Getpid())), 0700))
-81  }
-82  
-83  func must(err error) {
-84      if err != nil {
-85          panic(err)
-86      }
-87  }
-```
-
----
-
 ## LINE-BY-LINE EXPLANATION
 
-### Lines 1-8: Package and Imports
-
-```go
-package main
-```
-**Declares this as an executable program (main package).**
-- In Go, `package main` indicates this is an entry point for an executable
-- The compiler will look for a `main()` function to start execution
-
-```go
-import (
-    "fmt"
-    "os"
-    "os/exec"
-    "syscall"
-)
-```
-**Import required standard library packages:**
-
-- **`fmt`**: Formatted I/O (printing to console)
-- **`os`**: Operating system functions (file operations, process info, environment)
-- **`os/exec`**: Execute external commands and manage processes
-- **`syscall`**: Direct access to low-level operating system primitives
-  - This is the KEY package - it provides raw access to Linux kernel features
-  - Contains constants and functions for namespaces, chroot, mount, etc.
-
----
-
-### Lines 10-20: Main Entry Point
-
-```go
-func main() {
-```
-**Program entry point - executed when binary runs.**
-- Every executable Go program must have exactly one `main()` function in package `main`
-
-```go
-    switch os.Args[1] {
-```
-**Command-line argument parsing.**
-- `os.Args` is a slice containing all command-line arguments
-- `os.Args[0]` is the program name itself (e.g., `./container`)
-- `os.Args[1]` is the first argument after the program name
-- This creates a simple command router: `./container run /bin/bash` or `./container child /bin/bash`
-
-**Why two modes?**
-- `run`: Initial invocation by the user (parent process)
-- `child`: Re-execution of itself in new namespaces (child process)
-- This pattern allows the program to create namespaces by exec'ing itself
-
-```go
-    case "run":
-        run()
-    case "child":
-        child()
-    default:
-        panic("bad command")
-    }
-```
-**Route execution based on the command:**
-- If first arg is "run", call `run()` function
-- If first arg is "child", call `child()` function  
-- Otherwise, crash with error message
-
----
-
-### Lines 22-42: The `run()` Function (Parent Process)
+### The `run()` Function (Parent Process)
 
 This function runs in the PARENT namespace (the normal system namespace where you started the program).
 
@@ -195,7 +35,6 @@ func run() {
   - In the child (with CLONE_NEWPID), this will be PID 1
 
 ```go
-    // Create the command that will run in new namespaces
     cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
 ```
 **Create a command to execute ourselves with "child" argument.**
@@ -235,7 +74,6 @@ Child:     os.Args = ["/proc/self/exe", "child", "/bin/bash"]
 This makes the container interactive - you can type commands and see output.
 
 ```go
-    // CRITICAL: These flags create new namespaces
     cmd.SysProcAttr = &syscall.SysProcAttr{
 ```
 **Begin configuring syscall attributes for process creation.**
@@ -289,10 +127,6 @@ Each flag creates a NEW namespace for the child process:
 - `CLONE_NEWUSER`: User namespace (UID/GID isolation)
 - `CLONE_NEWCGROUP`: Cgroup namespace (cgroup visibility isolation)
 
-**The `|` operator:**
-- Bitwise OR - combines multiple flags into one bitmask
-- The kernel checks which bits are set to determine which namespaces to create
-
 ```go
         Unshareflags: syscall.CLONE_NEWNS,
     }
@@ -304,13 +138,11 @@ Each flag creates a NEW namespace for the child process:
 - Without this, mounts might still propagate due to mount point propagation types
 
 ```go
-    must(cmd.Run())
-}
+    cmd.Run()
 ```
 **Execute the child process and wait for it to complete.**
 - `cmd.Run()` starts the process and blocks until it exits
 - It combines `cmd.Start()` (create process) and `cmd.Wait()` (wait for exit)
-- `must()` is our error-checking helper (panics if error)
 
 At this point, the kernel:
 1. Creates new namespaces per the Cloneflags
@@ -321,7 +153,7 @@ At this point, the kernel:
 
 ---
 
-### Lines 44-70: The `child()` Function (Container Process)
+### The `child()` Function (Container Process)
 
 This function runs INSIDE the new namespaces. It's isolated from the parent system.
 
@@ -331,14 +163,13 @@ func child() {
 ```
 **Print our command and PID - should show PID 1 due to CLONE_NEWPID.**
 
-CRITICAL OBSERVATION:
+Important Observation:
 - In the parent, `os.Getpid()` returned something like 12345
 - In the child, `os.Getpid()` returns 1 (or 2 in some cases)
 - This proves we're in a new PID namespace
 - The child is the init process of its namespace
 
 ```go
-    // Setup cgroup for memory limit (simplified)
     cgroups()
 ```
 **Call the cgroups setup function (explained below).**
@@ -346,8 +177,7 @@ CRITICAL OBSERVATION:
 - Must be done before executing the target command
 
 ```go
-    // Change hostname (proving UTS namespace isolation)
-    must(syscall.Sethostname([]byte("container")))
+    syscall.Sethostname([]byte("container"))
 ```
 **Change the hostname to "container".**
 
@@ -360,8 +190,7 @@ CRITICAL OBSERVATION:
 You can verify: run `hostname` inside and outside the container - they'll be different.
 
 ```go
-    // Change root filesystem (pivot_root would be more correct)
-    must(syscall.Chroot("/path/to/rootfs"))
+    syscall.Chroot("/path/to/rootfs")
 ```
 **Change root directory (chroot jail).**
 
@@ -389,7 +218,7 @@ cp /lib/x86_64-linux-gnu/libc.so.* /tmp/rootfs/lib/
 cp /lib64/ld-linux-x86-64.so.* /tmp/rootfs/lib64/
 
 # Use this as your chroot path
-must(syscall.Chroot("/tmp/rootfs"))
+syscall.Chroot("/tmp/rootfs"))
 ```
 
 **Why not pivot_root?**
@@ -399,7 +228,7 @@ must(syscall.Chroot("/tmp/rootfs"))
 - `pivot_root` combined with unmounting the old root is more secure
 
 ```go
-    must(os.Chdir("/"))
+    os.Chdir("/")
 ```
 **Change current directory to the new root.**
 
@@ -411,8 +240,7 @@ We must explicitly cd to "/" to be fully inside the jail.
 - The process could potentially escape the chroot by following .. paths
 
 ```go
-    // Mount proc filesystem
-    must(syscall.Mount("proc", "proc", "proc", 0, ""))
+    syscall.Mount("proc", "proc", "proc", 0, "")
 ```
 **Mount the proc filesystem.**
 
@@ -449,7 +277,6 @@ ps aux  # Shows only container processes (because /proc is isolated)
 ```
 
 ```go
-    // Execute the actual command
     cmd := exec.Command(os.Args[2], os.Args[3:]...)
     cmd.Stdin = os.Stdin
     cmd.Stdout = os.Stdout
@@ -469,7 +296,7 @@ This creates: exec.Command("/bin/bash", "-l")
 ```
 
 ```go
-    must(cmd.Run())
+    cmd.Run()
 ```
 **Execute the target command and wait for it to exit.**
 
@@ -485,8 +312,7 @@ This is where your actual application runs - inside all the isolation we've set 
 When this command exits, the container terminates.
 
 ```go
-    // Cleanup
-    must(syscall.Unmount("proc", 0))
+    syscall.Unmount("proc", 0)
 }
 ```
 **Unmount /proc before exiting.**
@@ -497,7 +323,7 @@ When this command exits, the container terminates.
 
 ---
 
-### Lines 72-81: The `cgroups()` Function (Resource Limits)
+### The `cgroups()` Function (Resource Limits)
 
 ```go
 func cgroups() {
@@ -534,8 +360,7 @@ func cgroups() {
 - `0755` = rwxr-xr-x permissions
 
 ```go
-    // Limit memory to 100MB
-    must(os.WriteFile(cgroupPath+"/memory.limit_in_bytes", []byte("100000000"), 0700))
+    os.WriteFile(cgroupPath+"/memory.limit_in_bytes", []byte("100000000"), 0700)
 ```
 **Set the memory limit to 100MB.**
 
@@ -571,8 +396,7 @@ echo "8:0 1048576" > blkio.throttle.read_bps_device  # 1MB/s read limit
 ```
 
 ```go
-    // Add current process to cgroup
-    must(os.WriteFile(cgroupPath+"/cgroup.procs", []byte(fmt.Sprintf("%d", os.Getpid())), 0700))
+    os.WriteFile(cgroupPath+"/cgroup.procs", []byte(fmt.Sprintf("%d", os.Getpid())), 0700))
 }
 ```
 **Add the current process (and all children) to the cgroup.**
@@ -594,30 +418,7 @@ echo "8:0 1048576" > blkio.throttle.read_bps_device  # 1MB/s read limit
 
 ---
 
-### Lines 83-87: Error Handling Helper
-
-```go
-func must(err error) {
-    if err != nil {
-        panic(err)
-    }
-}
-```
-**Simple error checking - panic if there's an error.**
-
-- **`error` type**: Go's built-in error interface
-- **`nil`**: No error occurred
-- **`panic(err)`**: Crash the program with the error message
-
-This is simplified for demonstration. Production code would:
-- Log errors properly
-- Clean up resources (unmount, remove cgroups)
-- Return errors instead of panicking
-- Provide meaningful error messages
-
----
-
-## SYSCALL DEEP DIVE
+## SYSCALL DEEP DIVE (Advanced)
 
 ### clone() Syscall (via cmd.Run() with SysProcAttr)
 
@@ -735,7 +536,7 @@ mount("proc", "/proc", "proc", 0, NULL);
 
 ## ADVANCED TOPICS
 
-### What We Skipped (Production Requirements)
+### What We Skipped/Missed for a real container
 
 **1. User Namespaces (CLONE_NEWUSER):**
 ```go
@@ -801,68 +602,7 @@ syscall.Mount("overlay", "/merged", "overlay", 0,
 
 ---
 
-## TESTING THE CODE
-
-### Build and Run
-
-```bash
-# Build the container runtime
-go build -o container main.go
-
-# Create a minimal rootfs (Alpine-based)
-mkdir -p /tmp/alpine-rootfs
-cd /tmp/alpine-rootfs
-wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz
-tar -xzf alpine-minirootfs-3.19.0-x86_64.tar.gz
-rm alpine-minirootfs-3.19.0-x86_64.tar.gz
-
-# Update the code to use this rootfs
-# Change line 54 to: must(syscall.Chroot("/tmp/alpine-rootfs"))
-
-# Run as root (required for namespace operations)
-sudo ./container run /bin/sh
-```
-
-### Verify Isolation
-
-Inside the container:
-```bash
-# Check PID (should be 1 or 2)
-echo $$
-
-# Check hostname
-hostname  # Should show "container"
-
-# Check processes (only container processes visible)
-ps aux
-
-# Check memory limit is enforced
-cat /proc/self/cgroup  # Shows you're in mycontainer cgroup
-cat /sys/fs/cgroup/memory/mycontainer/memory.limit_in_bytes
-
-# Try to use > 100MB memory
-# (Use a memory-eating program or stress test)
-```
-
-Outside the container (different terminal):
-```bash
-# See the container process
-ps aux | grep container
-
-# Check actual cgroup membership
-cat /proc/$(pidof container)/cgroup
-
-# Monitor cgroup memory usage
-watch cat /sys/fs/cgroup/memory/mycontainer/memory.usage_in_bytes
-```
-
----
-
-## COMPARISON TO DOCKER
-
-### What Docker Adds
-
-Our minimal runtime is ~100 lines. Docker (actually runc) adds:
+## What Docker Adds
 
 1. **Image Management**:
    - Download and cache images

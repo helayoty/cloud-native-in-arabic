@@ -1,7 +1,9 @@
 
 # Create Container in Linux VM and Docker Networking Demos
 
-## Option 1: Access Docker Desktop VM
+## Option 1: Run Linux image via Docker
+
+This setup will show you the basic container setup. However, it won't let you experinse the networking and other advanced setup.
 
 ### Step 1: Verify Docker Desktop is Running
 
@@ -75,45 +77,199 @@ Where:
 
 Run a complete Linux VM on macOS for the most authentic experience.
 
-### Using Multipass
+### Using Lima
 
-#### Step 1: Install multipass
+#### Step 1: Install lima
 
 ```bash
 # Install Multipass
-brew install multipass
+brew install lima
 
-# Create Ubuntu VM
-multipass launch --name docker-vm --cpus 2 --memory 2G --disk 10G
-
-# Shell into VM
-multipass shell docker-vm
+limactl shell default
 ```
 
 #### Step 2: Install docker inside VM
 
 ```bash
 sudo apt update
-sudo apt install -y docker.io docker-compose jq bridge-utils
+sudo apt install -y runc docker.io docker-compose docker-cli jq bridge-utils net-tools
 
 # Add user to docker group
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-#### (Optional) Step 3: Copy files to VM
+#### Setup the Container
 
 ```bash
-multipass transfer <FILE_NAME_HERE> docker-vm:
+export CONTAINER_ID=container-1
 
-chmod +x <FILE_NAME_HERE>
+mkdir -p ~/${CONTAINER_ID}
+cd ~/${CONTAINER_ID}
+
+# Generate OCI spec
+runc spec
+
+# Verify config created
+file config.json
+
+# Create rootfs directory
+mkdir rootfs
+
+# Pull and export nginx image
+export IMAGE=ghcr.io/iximiuz/labs/nginx:alpine
+docker pull $IMAGE
+docker export $(docker create $IMAGE) | tar -C rootfs -xf -
+
+# Verify rootfs extraction
+ls rootfs/
+
+# Fix nginx directory
+
+# Create required directories and set permissions
+mkdir -p rootfs/var/cache/nginx/client_temp
+mkdir -p rootfs/var/cache/nginx/proxy_temp
+mkdir -p rootfs/var/cache/nginx/fastcgi_temp
+mkdir -p rootfs/var/cache/nginx/uwsgi_temp
+mkdir -p rootfs/var/cache/nginx/scgi_temp
+mkdir -p rootfs/var/log/nginx
+mkdir -p rootfs/var/run
+mkdir -p rootfs/run
+
+# Fix permissions for nginx
+chmod 777 rootfs/run
+chmod 777 rootfs/var/run
+chmod -R 755 rootfs/var/cache/nginx
+chmod -R 755 rootfs/var/log/nginx
+
+# ============================================
+# CONFIGURE CONTAINER
+# ============================================
+
+# Use sleep as init process (nginx will be started via exec)
+echo $(jq '.process.args = ["sleep", "infinity"]' config.json) > config.json
+
+# Disable terminal
+echo $(jq '.process.terminal = false' config.json) > config.json
+
+# Make rootfs writable
+echo $(jq '.root.readonly = false' config.json) > config.json
+
+# Add capabilities
+CAPS='["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID", "CAP_NET_BIND_SERVICE"]'
+echo $(jq ".process.capabilities.bounding += $CAPS" config.json) > config.json
+echo $(jq ".process.capabilities.effective += $CAPS" config.json) > config.json
+echo $(jq ".process.capabilities.permitted += $CAPS" config.json) > config.json
 ```
 
+### Step 4: Create the container
+
+```bash
+sudo runc create --bundle $(pwd) ${CONTAINER_ID}
+
+# Get container PID
+CONTAINER_PID=$(sudo runc state ${CONTAINER_ID} | jq -r '.pid')
+echo "Container PID: $CONTAINER_PID"
+```
+### Step 5: Setup Networking
+
+```bash
+# Create netns directory and symlink
+sudo mkdir -p /run/netns
+sudo ln -sT /proc/${CONTAINER_PID}/ns/net /run/netns/${CONTAINER_ID}
+
+# Create veth pair
+sudo ip link add veth0 type veth peer name ceth0
+sudo ip link set ceth0 netns ${CONTAINER_ID}
+
+# Configure container's interface
+sudo ip netns exec ${CONTAINER_ID} ip link set ceth0 up
+sudo ip netns exec ${CONTAINER_ID} ip addr add 192.168.0.2/24 dev ceth0
+
+# Configure host's interface
+sudo ip link set veth0 up
+sudo ip addr add 192.168.0.1/24 dev veth0
+
+# Verify networking is configured
+sudo ip netns exec ${CONTAINER_ID} ip addr
+```
+
+### Step 6: start and test the container
+
+```bash
+# Start container
+sudo runc start ${CONTAINER_ID}
+
+# Verify container is running
+sudo runc list
+
+# ============================================
+# START NGINX
+# ============================================
+
+# Check nginx is in the container
+sudo runc exec ${CONTAINER_ID} which nginx
+
+# Try starting nginx interactively to see errors
+sudo runc exec -it ${CONTAINER_ID} sh
+
+# Inside container:
+nginx -g "daemon off;" &
+netstat -tlnp
+ps aux
+exit
+
+# ============================================
+# TEST
+# ============================================
+
+# Test nginx is accessible (from Lima VM)
+curl -s http://192.168.0.2
+
+# Should see nginx welcome page HTML
+
+# Test with verbose output
+# curl -v http://192.168.0.2
+
+```
+
+### Step 7: (Optional) Interactive Testing
+
+```bash
+# Enter container interactively
+sudo runc exec -it ${CONTAINER_ID} sh
+
+ps aux
+ip addr
+netstat -tlnp
+
+exit
+```
+### Step 8: Clean Up
+
+```bash
+# Kill container
+sudo runc kill ${CONTAINER_ID} TERM
+
+# Wait a moment for it to stop
+sleep 2
+
+# Delete container
+sudo runc delete ${CONTAINER_ID}
+
+# Clean up networking
+sudo ip link delete veth0
+sudo rm -f /run/netns/${CONTAINER_ID}
+
+# Remove bundle directory
+cd ~
+rm -rf ${CONTAINER_ID}
+```
 ---
 
-## Running the Container Demo
+## Running the Container Golang Demo
 
-This demo shows how Linux namespaces and cgroups work - the building blocks of containers.
+This demo shows how Linux namespaces and cgroups work and the building blocks of containers.
 
 ### Step 1: Cross-compile on macOS
 
@@ -146,9 +302,10 @@ wget -qO- https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-min
 
 The rootfs (root filesystem) is needed because of this line in the code:
     syscall.Chroot("/rootfs")
-    syscall.Chroot("/rootfs")
+
 What chroot does:
 It changes what the process sees as / (root directory). After chroot, your container process can't see or access anything outside /rootfs.
+
 Why you need a complete filesystem:
 Without it, after chroot your container would have nothing - no /bin/sh, no commands, no libraries. The Alpine minirootfs (~3MB) provides:
 ```bash
