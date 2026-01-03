@@ -211,7 +211,7 @@ sudo runc list
 sudo runc exec ${CONTAINER_ID} which nginx
 
 # Try starting nginx interactively to see errors
-sudo runc exec -it ${CONTAINER_ID} sh
+sudo runc exec -tty ${CONTAINER_ID} sh
 
 # Inside container:
 nginx -g "daemon off;" &
@@ -237,7 +237,7 @@ curl -s http://192.168.0.2
 
 ```bash
 # Enter container interactively
-sudo runc exec -it ${CONTAINER_ID} sh
+sudo runc exec -tty ${CONTAINER_ID} sh
 
 ps aux
 ip addr
