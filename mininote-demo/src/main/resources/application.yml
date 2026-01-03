@@ -1,0 +1,18 @@
+debug: false
+
+server:
+  servlet:
+    context-path: /
+
+spring:
+  data:
+    mongodb:
+      uri: ${MONGO_URL:mongodb://localhost:27017/dev}
+  servlet: #optional
+    multipart:
+      max-file-size: 1048576KB
+      max-request-size: 1048576KB
+  freemarker:
+    template-loader-path: classpath:/templates
+    suffix: .ftlh
+
